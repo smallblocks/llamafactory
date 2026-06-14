@@ -42,7 +42,7 @@ def train_yaml(cfg: dict, *, multinode: bool = False) -> str:
         # --- data ---
         "dataset": DATASET_NAME,
         "dataset_dir": "/workspace/run",
-        "template": cfg.get("template", "gemma"),
+        "template": cfg.get("template", "gemma4"),
         "cutoff_len": int(cfg.get("cutoffLen", 4096)),
         "overwrite_cache": True,
         "preprocessing_num_workers": 8,
