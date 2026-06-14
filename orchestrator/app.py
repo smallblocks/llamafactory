@@ -157,7 +157,8 @@ async def start_train(request: Request):
 
     # Launch a detached container per node.
     image = cfg.get("dockerImage", "llamafactory-spark:latest")
-    master = sparks[0].host
+    # For multinode, use the high-speed 200G interconnect (10.200.0.x) instead of LAN.
+    master = cfg.get("multinodeInterface", sparks[0].host)
     for rank, sp in enumerate(sparks):
         env = [f"-e HF_TOKEN={shlex.quote(token)}"] if token else []
         if multinode:
@@ -165,6 +166,10 @@ async def start_train(request: Request):
                 "-e NNODES=2", f"-e NODE_RANK={rank}",
                 f"-e MASTER_ADDR={shlex.quote(master)}", "-e MASTER_PORT=29500",
                 "-e NPROC_PER_NODE=1",
+                # Route NCCL over the 200Gbps ConnectX interfaces
+                "-e NCCL_SOCKET_IFNAME=enp1s0f1np1",
+                "-e NCCL_IB_HCA=rocep1s0f1",
+                "-e NCCL_NET_GDR_LEVEL=5",
             ]
         net = "--network host" if multinode else ""
         hf_cache = f"/home/{sp.user}/.cache/huggingface"

@@ -52,10 +52,20 @@ const inputSpec = InputSpec.of({
   }),
   secondarySparkHost: Value.text({
     name: 'Secondary Spark Host',
-    description: 'Hostname/IP of the second Spark. Required only if "Use Both Sparks" is on.',
+    description: 'Hostname/IP of the second Spark (LAN IP for SSH). Required only if "Use Both Sparks" is on.',
     required: false,
     default: null,
-    placeholder: 'spark-02.local',
+    placeholder: '192.168.86.54',
+  }),
+  multinodeInterface: Value.text({
+    name: 'High-Speed Interface IP (NCCL Master)',
+    description:
+      'IP of the primary Spark on the 200GbE ConnectX link (e.g. 10.200.0.1). ' +
+      'NCCL uses this for gradient sync instead of the LAN. Leave empty to use ' +
+      'the primary Spark host IP.',
+    required: false,
+    default: null,
+    placeholder: '10.200.0.1',
   }),
   dockerImage: Value.text({
     name: 'Spark Image Tag',
@@ -104,6 +114,7 @@ export const configureSparks = sdk.Action.withInput(
       sshPort: cfg.sshPort,
       useBothSparks: cfg.useBothSparks,
       secondarySparkHost: cfg.secondarySparkHost ?? undefined,
+      multinodeInterface: cfg.multinodeInterface ?? undefined,
       dockerImage: cfg.dockerImage,
       remoteWorkDir: cfg.remoteWorkDir,
     }
@@ -125,6 +136,7 @@ export const configureSparks = sdk.Action.withInput(
       sshPort: input.sshPort,
       useBothSparks: input.useBothSparks,
       secondarySparkHost: input.secondarySparkHost,
+      multinodeInterface: input.multinodeInterface,
       dockerImage: input.dockerImage,
       remoteWorkDir: input.remoteWorkDir,
       hfTokenSet,

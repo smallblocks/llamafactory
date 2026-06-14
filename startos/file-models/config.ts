@@ -19,6 +19,9 @@ export const configShape = z.object({
   // Second Spark for 2-node FSDP over ConnectX/200GbE. null = single node.
   secondarySparkHost: z.string().nullable().default(null),
   useBothSparks: z.boolean().default(false),
+  // High-speed interface IP for NCCL master (e.g. 10.200.0.1 on 200GbE DAC).
+  // When set, MASTER_ADDR uses this instead of primarySparkHost for multi-node.
+  multinodeInterface: z.string().nullable().default(null),
 
   // --- Remote execution ---
   // Image built by spark/build.sh on each Spark.
@@ -30,7 +33,7 @@ export const configShape = z.object({
   model: z.string().default('google/gemma-4-31B-it'),
   // LLaMA-Factory chat template. Use the newest gemma template your
   // LLaMA-Factory build ships (gemma4 if present, else gemma).
-  template: z.string().default('gemma'),
+  template: z.string().default('gemma4'),
   finetuningType: z.enum(['lora', 'full']).default('lora'),
 
   // --- LoRA / hyperparameters ---
