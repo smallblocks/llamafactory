@@ -160,10 +160,12 @@ async def start_train(request: Request):
                 "-e NPROC_PER_NODE=1",
             ]
         net = "--network host" if multinode else ""
+        hf_cache = f"/home/{sp.user}/.cache/huggingface"
         cmd = (
             f"docker rm -f lf-{run_id} >/dev/null 2>&1; "
             f"docker run -d --name lf-{run_id} --gpus all --ipc=host --shm-size=16g {net} "
             f"-v {shlex.quote(remote)}:/workspace/run "
+            f"-v {shlex.quote(hf_cache)}:/workspace/hf "
             f"-w /workspace/run "
             f"-e DISABLE_VERSION_CHECK=1 "
             f"--entrypoint llamafactory-cli "
