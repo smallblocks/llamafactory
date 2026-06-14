@@ -163,8 +163,11 @@ async def start_train(request: Request):
         cmd = (
             f"docker rm -f lf-{run_id} >/dev/null 2>&1; "
             f"docker run -d --name lf-{run_id} --gpus all --shm-size=16g {net} "
-            f"-v {shlex.quote(remote)}:/workspace/run {' '.join(env)} "
-            f"{shlex.quote(image)} lf-train"
+            f"-v {shlex.quote(remote)}:/workspace/run "
+            f"-w /workspace/run "
+            f"--entrypoint llamafactory-cli "
+            f"{' '.join(env)} "
+            f"{shlex.quote(image)} train config.yaml"
         )
         res = sc.run(sp, cmd, timeout=120)
         if res.returncode != 0:
