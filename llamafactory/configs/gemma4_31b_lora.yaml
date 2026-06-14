@@ -1,0 +1,43 @@
+# Reference LLaMA-Factory config for a Gemma 4 31B LoRA fine-tune on a DGX Spark.
+# The orchestrator generates this automatically (orchestrator/lf_config.py); this
+# copy is for running `llamafactory-cli train gemma4_31b_lora.yaml` by hand.
+#
+# Paths assume the run dir is mounted at /workspace/run inside the Spark container.
+
+### model
+model_name_or_path: google/gemma-4-31B-it
+trust_remote_code: true
+
+### method
+stage: sft
+do_train: true
+finetuning_type: lora
+lora_target: all
+lora_rank: 16
+lora_alpha: 32
+
+### dataset
+dataset: ten31
+dataset_dir: /workspace/run
+template: gemma            # use 'gemma4' if your LLaMA-Factory build ships it
+cutoff_len: 4096
+overwrite_cache: true
+preprocessing_num_workers: 8
+
+### output
+output_dir: /workspace/run/output
+logging_steps: 1
+save_steps: 100
+plot_loss: true
+overwrite_output_dir: true
+report_to: none
+
+### train
+per_device_train_batch_size: 1
+gradient_accumulation_steps: 8
+learning_rate: 1.0e-4
+num_train_epochs: 3.0
+lr_scheduler_type: cosine
+warmup_ratio: 0.1
+bf16: true
+ddp_timeout: 180000000

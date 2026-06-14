@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>LLaMA-Factory · DGX Spark</title>
+<style>
+  :root { --bg:#0e1116; --panel:#171c24; --line:#262d39; --fg:#e6edf3; --mut:#8b97a7; --acc:#7aa2f7; --ok:#3fb950; --warn:#d29922; --err:#f85149; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 -apple-system,Segoe UI,Roboto,sans-serif; }
+  header { padding:18px 24px; border-bottom:1px solid var(--line); display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:17px; margin:0; font-weight:600; }
+  header .sub { color:var(--mut); font-size:12px; }
+  main { max-width:980px; margin:0 auto; padding:24px; display:grid; gap:20px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:18px; }
+  .card h2 { font-size:13px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); margin:0 0 14px; }
+  label { display:block; font-size:12px; color:var(--mut); margin:10px 0 4px; }
+  input,select { width:100%; background:#0e1116; border:1px solid var(--line); color:var(--fg); border-radius:7px; padding:8px 10px; font:inherit; }
+  .grid { display:grid; grid-template-columns:1fr 1fr 1fr; gap:10px; }
+  button { background:var(--acc); color:#0b1220; border:0; border-radius:7px; padding:9px 16px; font-weight:600; cursor:pointer; }
+  button.ghost { background:transparent; color:var(--fg); border:1px solid var(--line); font-weight:500; }
+  button:disabled { opacity:.5; cursor:not-allowed; }
+  .row { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  th,td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--mut); font-weight:500; font-size:11px; text-transform:uppercase; }
+  .pill { font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); }
+  .pill.running { color:var(--acc); border-color:var(--acc); }
+  .pill.completed { color:var(--ok); border-color:var(--ok); }
+  .pill.failed,.pill.stopped { color:var(--err); border-color:var(--err); }
+  pre#log { background:#05080d; border:1px solid var(--line); border-radius:8px; padding:12px; height:340px; overflow:auto; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospace; color:#c9d4e3; }
+  .muted { color:var(--mut); }
+  .banner { background:#1d2330; border:1px solid var(--warn); border-radius:8px; padding:10px 12px; color:var(--warn); font-size:13px; }
+  a { color:var(--acc); }
+</style>
+</head>
+<body>
+<header>
+  <h1>🦙 LLaMA-Factory</h1>
+  <span class="sub">orchestrating fine-tunes on your DGX Sparks</span>
+</header>
+<main>
+  <div id="cfgBanner" class="banner" style="display:none"></div>
+
+  <div class="card">
+    <h2>Target</h2>
+    <div class="row" id="cfgSummary"><span class="muted">loading…</span></div>
+    <p class="muted" style="margin:12px 0 0">Connection, model & hyperparameter defaults are set via the StartOS actions
+      <em>Configure Sparks</em> and <em>Training Defaults</em>. Override per-run below.</p>
+  </div>
+
+  <div class="card">
+    <h2>Dataset</h2>
+    <table id="dsTable"><thead><tr><th>File</th><th>Examples</th><th>Size</th></tr></thead><tbody></tbody></table>
+    <div class="row" style="margin-top:12px">
+      <input type="file" id="dsFile" accept=".jsonl" />
+      <button class="ghost" onclick="uploadDs()">Upload .jsonl</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>New Fine-tune</h2>
+    <label>Dataset</label>
+    <select id="runDataset"></select>
+    <div class="grid">
+      <div><label>Model (override)</label><input id="ovModel" placeholder="(use default)"/></div>
+      <div><label>Epochs</label><input id="ovEpochs" placeholder="(default)"/></div>
+      <div><label>Learning rate</label><input id="ovLr" placeholder="(default)"/></div>
+      <div><label>LoRA rank</label><input id="ovRank" placeholder="(default)"/></div>
+      <div><label>Cutoff length</label><input id="ovCut" placeholder="(default)"/></div>
+      <div><label>Grad accum</label><input id="ovGa" placeholder="(default)"/></div>
+    </div>
+    <div class="row" style="margin-top:16px">
+      <button id="startBtn" onclick="startRun()">Start fine-tune</button>
+      <span id="startMsg" class="muted"></span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Runs</h2>
+    <table id="runsTable"><thead><tr><th>Run</th><th>Model</th><th>Dataset</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+  </div>
+
+  <div class="card" id="logCard" style="display:none">
+    <h2>Logs · <span id="logRun"></span></h2>
+    <pre id="log"></pre>
+    <div class="row" style="margin-top:10px">
+      <button class="ghost" onclick="stopRun()">Stop</button>
+      <button class="ghost" onclick="fetchAdapter()">Fetch adapter ↓</button>
+      <span id="logMsg" class="muted"></span>
+    </div>
+  </div>
+</main>
+
+<script>
+let CURRENT = null, logReader = null;
+const $ = s => document.querySelector(s);
+const j = (u,o) => fetch(u,o).then(r => r.ok ? r.json() : r.json().then(e=>{throw new Error(e.detail||r.statusText)}));
+
+async function loadConfig(){
+  try {
+    const c = await j('/api/config');
+    const sparks = [c.primarySparkHost, c.useBothSparks ? c.secondarySparkHost : null].filter(Boolean).join(' + ');
+    $('#cfgSummary').innerHTML =
+      `<span class="pill">${c.model||'?'}</span>`+
+      `<span class="pill">${c.finetuningType||'lora'}</span>`+
+      `<span class="pill">Spark: ${sparks||'<not set>'}</span>`+
+      `<span class="pill">${c.quantizationBit?('QLoRA '+c.quantizationBit+'-bit'):'bf16'}</span>`;
+    if(!c.primarySparkHost){
+      $('#cfgBanner').style.display='block';
+      $('#cfgBanner').textContent='No Spark configured yet — run the "Configure Sparks" action in StartOS first.';
+    }
+  } catch(e){
+    $('#cfgBanner').style.display='block';
+    $('#cfgBanner').textContent = e.message;
+  }
+}
+
+async function loadDatasets(){
+  const ds = await j('/api/datasets');
+  $('#dsTable').querySelector('tbody').innerHTML =
+    ds.map(d=>`<tr><td>${d.name}</td><td>${d.examples}</td><td>${(d.bytes/1024).toFixed(1)} KB</td></tr>`).join('')
+    || '<tr><td colspan="3" class="muted">No datasets. Upload a .jsonl below.</td></tr>';
+  $('#runDataset').innerHTML = ds.map(d=>`<option>${d.name}</option>`).join('');
+}
+
+async function uploadDs(){
+  const f = $('#dsFile').files[0];
+  if(!f) return;
+  const fd = new FormData(); fd.append('file', f);
+  await fetch('/api/datasets',{method:'POST',body:fd});
+  loadDatasets();
+}
+
+async function startRun(){
+  $('#startBtn').disabled = true; $('#startMsg').textContent = 'launching…';
+  const ov = {};
+  const map = {ovModel:'model',ovEpochs:'epochs',ovLr:'learningRate',ovRank:'loraRank',ovCut:'cutoffLen',ovGa:'gradAccumSteps'};
+  for(const [el,key] of Object.entries(map)){ const v=$('#'+el).value.trim(); if(v) ov[key]=v; }
+  try {
+    const r = await j('/api/train',{method:'POST',headers:{'content-type':'application/json'},
+      body:JSON.stringify({dataset:$('#runDataset').value, overrides:ov})});
+    $('#startMsg').textContent = 'started '+r.run_id;
+    await loadRuns(); openRun(r.run_id);
+  } catch(e){ $('#startMsg').textContent = '❌ '+e.message; }
+  $('#startBtn').disabled = false;
+}
+
+async function loadRuns(){
+  const runs = await j('/api/runs');
+  $('#runsTable').querySelector('tbody').innerHTML = runs.map(r=>{
+    const st = r.status||'?';
+    return `<tr><td>${r.run_id}</td><td>${r.model||''}</td><td>${r.dataset||''}</td>`+
+      `<td><span class="pill ${st}">${st}</span></td>`+
+      `<td><button class="ghost" onclick="openRun('${r.run_id}')">Logs</button></td></tr>`;
+  }).join('') || '<tr><td colspan="5" class="muted">No runs yet.</td></tr>';
+}
+
+async function openRun(id){
+  CURRENT = id;
+  $('#logCard').style.display='block'; $('#logRun').textContent = id; $('#log').textContent='';
+  $('#logCard').scrollIntoView({behavior:'smooth'});
+  if(logReader){ try{ logReader.cancel(); }catch(e){} }
+  try {
+    const resp = await fetch(`/api/runs/${id}/log?follow=1`);
+    logReader = resp.body.getReader();
+    const dec = new TextDecoder();
+    while(true){
+      const {done,value} = await logReader.read();
+      if(done) break;
+      $('#log').textContent += dec.decode(value,{stream:true});
+      $('#log').scrollTop = $('#log').scrollHeight;
+    }
+  } catch(e){ $('#log').textContent += '\n[log stream ended]'; }
+  loadRuns();
+}
+
+async function stopRun(){ if(!CURRENT) return; $('#logMsg').textContent='stopping…';
+  await fetch(`/api/runs/${CURRENT}/stop`,{method:'POST'}); $('#logMsg').textContent='stopped'; loadRuns(); }
+
+async function fetchAdapter(){ if(!CURRENT) return; $('#logMsg').textContent='fetching adapter…';
+  try{ const r= await j(`/api/runs/${CURRENT}/fetch`,{method:'POST'}); $('#logMsg').textContent='saved to '+r.local_path; }
+  catch(e){ $('#logMsg').textContent='❌ '+e.message; } }
+
+loadConfig(); loadDatasets(); loadRuns();
+setInterval(loadRuns, 15000);
+</script>
+</body>
+</html>
