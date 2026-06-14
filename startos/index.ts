@@ -2,9 +2,13 @@ import { sdk } from './sdk'
 import { versions } from './versions'
 import { actions } from './actions'
 import { setInterfaces } from './interfaces'
+import { buildManifest } from '@start9labs/start-sdk'
+import { manifest as sdkManifest } from './manifest'
 
 // Required ABI exports for a StartOS service package.
-export { manifest } from './manifest'
+// buildManifest injects the version (from VersionGraph) + SDK metadata
+// that start-cli s9pk pack requires.
+export const manifest = buildManifest(versions, sdkManifest)
 export { main } from './main'
 export { actions } from './actions'
 
