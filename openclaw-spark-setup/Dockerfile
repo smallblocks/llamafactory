@@ -33,7 +33,7 @@ WORKDIR /opt/LLaMA-Factory
 # Install WITHOUT the torch extra so we keep NGC's Blackwell-built torch.
 # metrics -> rouge/bleu for eval; deepspeed/accelerate come in for multi-node.
 RUN pip install --no-build-isolation -e ".[metrics,deepspeed]" && \
-    pip install "huggingface_hub[cli]" "accelerate>=0.34"
+    pip install "huggingface_hub[cli]" "accelerate>=0.34" torchaudio
 
 # Sanity: fail the build early if torch can't see CUDA / the right arch.
 RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda); \
