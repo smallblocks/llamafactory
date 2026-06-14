@@ -35,7 +35,13 @@ WORKDIR /opt/LLaMA-Factory
 # metrics -> rouge/bleu for eval; deepspeed/accelerate come in for multi-node.
 RUN pip install hatchling editables && \
     pip install --no-build-isolation -e ".[metrics,deepspeed]" && \
-    pip install "huggingface_hub[cli]" "accelerate>=0.34" torchaudio
+    pip install "huggingface_hub[cli]" "accelerate>=0.34"
+
+# torchaudio pulls a CUDA-13-linked wheel but NGC 25.06 ships CUDA 12.9 libs.
+# We only do text SFT, so patch the unconditional `import torchaudio` in
+# mm_plugin.py to a guarded try/except instead of fighting wheel ABI mismatches.
+RUN sed -i 's/^import torchaudio$/try:\n    import torchaudio\nexcept (ImportError, OSError):\n    torchaudio = None/' \
+    /opt/LLaMA-Factory/src/llamafactory/data/mm_plugin.py
 
 # Sanity: fail the build early if torch can't see CUDA / the right arch.
 RUN python -c "import torch; print('torch', torch.__version__, 'cuda', torch.version.cuda); \
