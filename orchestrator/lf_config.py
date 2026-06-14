@@ -32,6 +32,13 @@ def dataset_info(file_name: str) -> dict[str, Any]:
 def train_yaml(cfg: dict, *, multinode: bool = False) -> str:
     """Build a LLaMA-Factory train config. Paths are RemotePaths inside the
     container on the Spark, where the run dir is mounted at /workspace/run."""
+    qb = cfg.get("quantizationBit")
+    is_quant = qb in (4, 8)
+
+    # When quantized, default to smaller batch / less grad accum unless overridden.
+    default_batch = 2 if is_quant else 1
+    default_ga = 4 if is_quant else 8
+
     out: dict[str, Any] = {
         "model_name_or_path": cfg.get("model", "google/gemma-4-31B-it"),
         "trust_remote_code": True,
@@ -54,8 +61,8 @@ def train_yaml(cfg: dict, *, multinode: bool = False) -> str:
         "overwrite_output_dir": True,
         "report_to": "none",
         # --- train ---
-        "per_device_train_batch_size": int(cfg.get("perDeviceBatchSize", 1)),
-        "gradient_accumulation_steps": int(cfg.get("gradAccumSteps", 8)),
+        "per_device_train_batch_size": int(cfg.get("perDeviceBatchSize", default_batch)),
+        "gradient_accumulation_steps": int(cfg.get("gradAccumSteps", default_ga)),
         "learning_rate": float(cfg.get("learningRate", "1.0e-4")),
         "num_train_epochs": float(cfg.get("epochs", 3)),
         "lr_scheduler_type": "cosine",
@@ -64,13 +71,20 @@ def train_yaml(cfg: dict, *, multinode: bool = False) -> str:
         "ddp_timeout": 180000000,
     }
 
+    # Packing: concat samples into cutoff_len chunks (default ON)
+    if cfg.get("packing", True):
+        out["packing"] = True
+
+    # torch.compile: optional JIT compilation of the model
+    if cfg.get("torchCompile"):
+        out["torch_compile"] = True
+
     if out["finetuning_type"] == "lora":
         out["lora_target"] = "all"
         out["lora_rank"] = int(cfg.get("loraRank", 16))
         out["lora_alpha"] = int(cfg.get("loraAlpha", 32))
 
-    qb = cfg.get("quantizationBit")
-    if qb in (4, 8):
+    if is_quant:
         out["quantization_bit"] = int(qb)
         out["quantization_method"] = "bitsandbytes"
 

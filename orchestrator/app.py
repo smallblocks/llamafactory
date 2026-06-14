@@ -12,7 +12,10 @@ import json
 import os
 import re
 import shlex
+import shutil
+import threading
 import time
+from typing import Any
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.responses import HTMLResponse, StreamingResponse, JSONResponse
@@ -32,6 +35,10 @@ templates = Jinja2Templates(directory=os.path.join(os.path.dirname(__file__), "t
 
 for d in (DATASETS_DIR, RUNS_DIR):
     os.makedirs(d, exist_ok=True)
+
+# Cached Docker status for list_runs (avoids hammering SSH on rapid polling)
+_docker_status_cache: dict[str, Any] = {"ts": 0.0, "data": {}}
+_docker_status_lock = threading.Lock()
 
 
 # ----------------------------------------------------------------------------- helpers
@@ -186,14 +193,159 @@ async def start_train(request: Request):
     return {"ok": True, "run_id": run_id}
 
 
+def _read_trainer_progress(run_id: str) -> dict:
+    """Read the last line of trainer_log.jsonl to extract training progress."""
+    log_path = os.path.join(_run_path(run_id), "output", "trainer_log.jsonl")
+    if not os.path.exists(log_path):
+        return {}
+    try:
+        last_line = ""
+        with open(log_path, "rb") as f:
+            # Seek from end for efficiency
+            f.seek(0, 2)
+            pos = f.tell()
+            buf = b""
+            while pos > 0:
+                pos = max(pos - 4096, 0)
+                f.seek(pos)
+                buf = f.read(4096) + buf
+                lines = buf.split(b"\n")
+                # Need at least 2 entries (last may be empty)
+                if len(lines) >= 2:
+                    for l in reversed(lines):
+                        l = l.strip()
+                        if l:
+                            last_line = l.decode("utf-8", errors="replace")
+                            break
+                    if last_line:
+                        break
+        if not last_line:
+            return {}
+        entry = json.loads(last_line)
+        return {
+            "current_steps": entry.get("current_steps"),
+            "total_steps": entry.get("total_steps"),
+            "loss": entry.get("loss"),
+            "elapsed_time": entry.get("elapsed_time"),
+            "percentage": entry.get("percentage"),
+        }
+    except Exception:
+        return {}
+
+
+def _batch_docker_status(cfg: dict, run_ids: list[str]) -> dict[str, str]:
+    """Check Docker container status for all run_ids in a single SSH call.
+    Returns {run_id: 'running'|'completed'|'failed'|'exited'|...} for found containers.
+    Caches results for 10 seconds."""
+    with _docker_status_lock:
+        now = time.time()
+        if now - _docker_status_cache["ts"] < 10:
+            return _docker_status_cache["data"]
+
+    if not run_ids:
+        return {}
+
+    try:
+        sp = sc.sparks(cfg)[0]
+    except Exception:
+        return {}
+
+    # Build a single command that inspects all containers at once
+    names = " ".join(f"lf-{rid}" for rid in run_ids)
+    cmd = f"docker inspect --format '{{{{.Name}}}} {{{{.State.Status}}}} {{{{.State.ExitCode}}}}' {names} 2>/dev/null || true"
+    res = sc.run(sp, cmd, timeout=30)
+    result: dict[str, str] = {}
+    for line in (res.stdout or "").strip().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) >= 3:
+            name = parts[0].lstrip("/")  # Docker prefixes with /
+            status_raw = parts[1]
+            exit_code = parts[2]
+            # Extract run_id from container name "lf-YYYYMMDD-HHMMSS"
+            rid = name[3:] if name.startswith("lf-") else name
+            if status_raw == "exited" and exit_code == "0":
+                result[rid] = "completed"
+            elif status_raw == "exited":
+                result[rid] = "failed"
+            else:
+                result[rid] = status_raw
+
+    with _docker_status_lock:
+        _docker_status_cache["ts"] = time.time()
+        _docker_status_cache["data"] = result
+    return result
+
+
+def _format_duration(seconds: float) -> str:
+    """Format seconds into a human-friendly duration string."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    m, s = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {s:02d}s"
+    h, m = divmod(m, 60)
+    return f"{h}h {m:02d}m"
+
+
 @app.get("/api/runs")
 def list_runs():
+    run_ids = []
+    for name in sorted(os.listdir(RUNS_DIR), reverse=True):
+        if os.path.isdir(_run_path(name)):
+            run_ids.append(name)
+
+    if not run_ids:
+        return []
+
+    # Batch-check Docker status for all runs
+    try:
+        cfg = _cfg()
+        docker_status = _batch_docker_status(cfg, run_ids)
+    except HTTPException:
+        docker_status = {}
+
     runs = []
-    for run_id in sorted(os.listdir(RUNS_DIR), reverse=True):
-        if not os.path.isdir(_run_path(run_id)):
-            continue
+    now = time.time()
+    for run_id in run_ids:
         meta = _read_run_meta(run_id)
-        runs.append(meta or {"run_id": run_id})
+        if not meta:
+            meta = {"run_id": run_id}
+
+        # Update status from Docker if we got info
+        ds = docker_status.get(run_id)
+        if ds and meta.get("status") == "running":
+            if ds in ("completed", "failed"):
+                meta["status"] = ds
+                _write_run_meta(run_id, meta)
+            elif ds != "running":
+                meta["status"] = ds
+
+        # Read training progress
+        progress = _read_trainer_progress(run_id)
+        meta["progress"] = progress.get("percentage")
+        meta["loss"] = progress.get("loss")
+        meta["current_steps"] = progress.get("current_steps")
+        meta["total_steps"] = progress.get("total_steps")
+        elapsed_time = progress.get("elapsed_time")
+        meta["elapsed"] = elapsed_time if elapsed_time else None
+
+        # Compute duration
+        started = meta.get("started")
+        if started:
+            if meta.get("status") in ("completed", "failed", "stopped"):
+                meta["duration"] = _format_duration(now - started)
+            elif meta.get("status") == "running":
+                meta["duration"] = _format_duration(now - started)
+            else:
+                meta["duration"] = None
+        else:
+            meta["duration"] = None
+
+        runs.append(meta)
     return runs
 
 
@@ -250,6 +402,60 @@ def run_fetch(run_id: str):
     if r.returncode != 0:
         raise HTTPException(502, f"rsync back failed: {r.stderr}")
     return {"ok": True, "local_path": local_out}
+
+
+@app.delete("/api/runs/{run_id}")
+def delete_run(run_id: str):
+    """Stop container, remove remote dir, remove local dir."""
+    local = _run_path(run_id)
+    if not os.path.isdir(local):
+        raise HTTPException(404, "no such run")
+    meta = _read_run_meta(run_id)
+    try:
+        cfg = _cfg()
+        for sp in sc.sparks(cfg):
+            sc.run(sp, f"docker rm -f lf-{run_id} 2>/dev/null || true", timeout=60)
+        remote = _remote_run_dir(cfg, run_id)
+        sp = sc.sparks(cfg)[0]
+        sc.run(sp, f"rm -rf {shlex.quote(remote)}", timeout=60)
+    except HTTPException:
+        pass  # config may be missing; still clean up local
+    shutil.rmtree(local, ignore_errors=True)
+    # Invalidate cache
+    with _docker_status_lock:
+        _docker_status_cache["ts"] = 0.0
+    return {"ok": True}
+
+
+@app.post("/api/runs/cleanup")
+async def cleanup_runs(request: Request):
+    """Delete all runs matching given statuses."""
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    target_statuses = set(body.get("status", ["completed", "failed", "stopped"]))
+    deleted = []
+    for run_id in list(os.listdir(RUNS_DIR)):
+        if not os.path.isdir(_run_path(run_id)):
+            continue
+        meta = _read_run_meta(run_id)
+        if meta.get("status") in target_statuses:
+            try:
+                cfg = _cfg()
+                for sp in sc.sparks(cfg):
+                    sc.run(sp, f"docker rm -f lf-{run_id} 2>/dev/null || true", timeout=60)
+                remote = _remote_run_dir(cfg, run_id)
+                sp = sc.sparks(cfg)[0]
+                sc.run(sp, f"rm -rf {shlex.quote(remote)}", timeout=60)
+            except HTTPException:
+                pass
+            shutil.rmtree(_run_path(run_id), ignore_errors=True)
+            deleted.append(run_id)
+    # Invalidate cache
+    with _docker_status_lock:
+        _docker_status_cache["ts"] = 0.0
+    return {"ok": True, "deleted": deleted}
 
 
 @app.get("/healthz")

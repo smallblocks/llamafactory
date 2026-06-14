@@ -25,9 +25,18 @@
   th,td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); }
   th { color:var(--mut); font-weight:500; font-size:11px; text-transform:uppercase; }
   .pill { font-size:11px; padding:2px 8px; border-radius:20px; border:1px solid var(--line); }
-  .pill.running { color:var(--acc); border-color:var(--acc); }
+  .pill.running { color:var(--acc); border-color:var(--acc); animation:pulse 2s ease-in-out infinite; }
   .pill.completed { color:var(--ok); border-color:var(--ok); }
   .pill.failed,.pill.stopped { color:var(--err); border-color:var(--err); }
+  @keyframes pulse { 0%,100%{ opacity:1; } 50%{ opacity:.55; } }
+  .progress-info { font-size:12px; color:var(--mut); white-space:nowrap; }
+  .progress-info .loss-val { color:var(--fg); font-weight:500; }
+  .dur { font-size:12px; color:var(--mut); white-space:nowrap; }
+  .btn-del { background:transparent; border:1px solid transparent; color:var(--mut); font-size:14px; padding:4px 7px; border-radius:5px; cursor:pointer; transition:all .15s; min-width:0; font-weight:400; }
+  .btn-del:hover { color:var(--err); border-color:var(--err); background:rgba(248,81,73,.08); }
+  .btn-cleanup { background:transparent; color:var(--mut); border:1px solid var(--line); font-size:12px; padding:5px 12px; border-radius:6px; cursor:pointer; font-weight:500; }
+  .btn-cleanup:hover { color:var(--err); border-color:var(--err); }
+  .actions-cell { display:flex; gap:4px; align-items:center; }
   pre#log { background:#05080d; border:1px solid var(--line); border-radius:8px; padding:12px; height:340px; overflow:auto; white-space:pre-wrap; font:12px/1.45 ui-monospace,Menlo,monospace; color:#c9d4e3; }
   .muted { color:var(--mut); }
   .banner { background:#1d2330; border:1px solid var(--warn); border-radius:8px; padding:10px 12px; color:var(--warn); font-size:13px; }
@@ -78,7 +87,10 @@
 
   <div class="card">
     <h2>Runs</h2>
-    <table id="runsTable"><thead><tr><th>Run</th><th>Model</th><th>Dataset</th><th>Status</th><th></th></tr></thead><tbody></tbody></table>
+    <div id="cleanupWrap" style="margin-bottom:10px;display:none">
+      <button class="btn-cleanup" onclick="cleanupRuns()">🧹 Clear finished runs</button>
+    </div>
+    <table id="runsTable"><thead><tr><th>Run</th><th>Model</th><th>Dataset</th><th>Status</th><th>Progress</th><th>Duration</th><th>Actions</th></tr></thead><tbody></tbody></table>
   </div>
 
   <div class="card" id="logCard" style="display:none">
@@ -146,14 +158,56 @@ async function startRun(){
   $('#startBtn').disabled = false;
 }
 
+function fmtProgress(r){
+  const st = r.status||'?';
+  if(st==='running' && r.current_steps!=null && r.total_steps){
+    const pct = r.percentage!=null ? Math.round(r.percentage)+'%' : '';
+    const loss = r.loss!=null ? ` · loss <span class="loss-val">${Number(r.loss).toFixed(2)}</span>` : '';
+    return `<span class="progress-info">${r.current_steps}/${r.total_steps} steps${pct?' ('+pct+')':''}${loss}</span>`;
+  }
+  if(st==='completed' && r.loss!=null){
+    return `<span class="progress-info">✅ loss <span class="loss-val">${Number(r.loss).toFixed(2)}</span></span>`;
+  }
+  if(st==='failed') return `<span class="progress-info" style="color:var(--err)">✗</span>`;
+  return `<span class="progress-info">—</span>`;
+}
+function fmtDuration(r){
+  if(!r.duration) return '<span class="dur">—</span>';
+  const prefix = r.status==='running'?'running ':'';
+  return `<span class="dur">${prefix}${r.duration}</span>`;
+}
 async function loadRuns(){
   const runs = await j('/api/runs');
+  const finished = runs.filter(r=>['completed','failed','stopped'].includes(r.status));
+  const cw = $('#cleanupWrap');
+  if(finished.length>0){ cw.style.display='block'; cw.querySelector('button').textContent=`🧹 Clear ${finished.length} finished run${finished.length>1?'s':''}`;}
+  else { cw.style.display='none'; }
   $('#runsTable').querySelector('tbody').innerHTML = runs.map(r=>{
     const st = r.status||'?';
+    let actions = `<div class="actions-cell">`+
+      `<button class="ghost" style="padding:4px 10px;font-size:12px" onclick="openRun('${r.run_id}')">Logs</button>`;
+    if(st==='completed') actions += `<button class="ghost" style="padding:4px 10px;font-size:12px" onclick="CURRENT='${r.run_id}';fetchAdapter()">Fetch</button>`;
+    actions += `<button class="btn-del" title="Delete run" onclick="deleteRun('${r.run_id}')">🗑</button></div>`;
     return `<tr><td>${r.run_id}</td><td>${r.model||''}</td><td>${r.dataset||''}</td>`+
       `<td><span class="pill ${st}">${st}</span></td>`+
-      `<td><button class="ghost" onclick="openRun('${r.run_id}')">Logs</button></td></tr>`;
-  }).join('') || '<tr><td colspan="5" class="muted">No runs yet.</td></tr>';
+      `<td>${fmtProgress(r)}</td>`+
+      `<td>${fmtDuration(r)}</td>`+
+      `<td>${actions}</td></tr>`;
+  }).join('') || '<tr><td colspan="7" class="muted">No runs yet.</td></tr>';
+}
+async function deleteRun(id){
+  if(!confirm(`Delete run ${id}? This removes the container and all data.`)) return;
+  try { await j(`/api/runs/${id}`,{method:'DELETE'}); } catch(e){ alert('Delete failed: '+e.message); }
+  loadRuns();
+}
+async function cleanupRuns(){
+  const runs = await j('/api/runs');
+  const n = runs.filter(r=>['completed','failed','stopped'].includes(r.status)).length;
+  if(!n){ alert('No finished runs to clean up.'); return; }
+  if(!confirm(`Delete ${n} finished run${n>1?'s':''}?`)) return;
+  try { await j('/api/runs/cleanup',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({})}); }
+  catch(e){ alert('Cleanup failed: '+e.message); }
+  loadRuns();
 }
 
 async function openRun(id){
