@@ -11,7 +11,7 @@
 # NGC tag note: pick a recent aarch64 PyTorch tag with CUDA >= 12.8. 25.04 ships
 # CUDA 12.8. Bump this as NVIDIA publishes DGX-Spark-tuned tags; keep CUDA >= 12.8
 # or the GPU (compute capability 12.1) will not be targeted.
-ARG NGC_TAG=25.04-py3
+ARG NGC_TAG=25.06-py3
 FROM nvcr.io/nvidia/pytorch:${NGC_TAG}
 
 ARG LLAMAFACTORY_REF=main
@@ -31,8 +31,10 @@ RUN git clone --depth 1 --branch ${LLAMAFACTORY_REF} https://github.com/hiyouga/
 
 WORKDIR /opt/LLaMA-Factory
 # Install WITHOUT the torch extra so we keep NGC's Blackwell-built torch.
+# hatchling is the build backend; must be pre-installed for --no-build-isolation.
 # metrics -> rouge/bleu for eval; deepspeed/accelerate come in for multi-node.
-RUN pip install --no-build-isolation -e ".[metrics,deepspeed]" && \
+RUN pip install hatchling editables && \
+    pip install --no-build-isolation -e ".[metrics,deepspeed]" && \
     pip install "huggingface_hub[cli]" "accelerate>=0.34" torchaudio
 
 # Sanity: fail the build early if torch can't see CUDA / the right arch.
