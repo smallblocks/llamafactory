@@ -33,21 +33,21 @@ def train_yaml(cfg: dict, *, multinode: bool = False) -> str:
     """Build a LLaMA-Factory train config. Paths are RemotePaths inside the
     container on the Spark, where the run dir is mounted at /workspace/run."""
     out: dict[str, Any] = {
-        "model_name_or_path": cfg["model"],
+        "model_name_or_path": cfg.get("model", "google/gemma-4-31B-it"),
         "trust_remote_code": True,
         # --- method ---
         "stage": "sft",
         "do_train": True,
         "finetuning_type": cfg.get("finetuningType", "lora"),
-        # --- data ---
+        # --- data (paths relative to cwd = the run dir) ---
         "dataset": DATASET_NAME,
-        "dataset_dir": "/workspace/run",
+        "dataset_dir": ".",
         "template": cfg.get("template", "gemma"),
         "cutoff_len": int(cfg.get("cutoffLen", 4096)),
         "overwrite_cache": True,
         "preprocessing_num_workers": 8,
         # --- output ---
-        "output_dir": "/workspace/run/output",
+        "output_dir": "./output",
         "logging_steps": 1,
         "save_steps": 100,
         "plot_loss": True,
@@ -75,8 +75,8 @@ def train_yaml(cfg: dict, *, multinode: bool = False) -> str:
         out["quantization_method"] = "bitsandbytes"
 
     if multinode:
-        # ZeRO-3 across the two Sparks; entrypoint sets FORCE_TORCHRUN/NNODES.
-        out["deepspeed"] = "/workspace/run/ds_z3.json"
+        # ZeRO-3 across the two Sparks.
+        out["deepspeed"] = "./ds_z3.json"
 
     return yaml.safe_dump(out, sort_keys=False)
 

@@ -1,10 +1,10 @@
 """LLaMA-Factory orchestrator: a small control plane that dispatches fine-tune
 jobs to remote DGX Sparks over SSH and streams logs back.
 
-Job model: each run is a `docker` container on the Spark named `lf-<run_id>`.
-Docker is the remote job manager — start detached, follow with `docker logs -f`,
-check state with `docker inspect`, stop with `docker rm -f`. The run dir
-(config + dataset) is rsynced up; the output adapter is rsynced back.
+Job model (lean): each run is a background process on the Spark. LLaMA-Factory
+is pip-installed directly on the Spark — no Docker needed for training. The run
+dir (config + dataset) is rsynced up; the output adapter is rsynced back. Logs
+are written to train.log in the run dir and streamed via `tail -f`.
 """
 from __future__ import annotations
 
@@ -60,7 +60,7 @@ def _hf_token() -> str | None:
 
 
 def _remote_run_dir(cfg: dict, run_id: str) -> str:
-    return os.path.join(cfg.get("remoteWorkDir", "/home/nvidia/llamafactory-runs"), run_id)
+    return os.path.join(cfg.get("remoteWorkDir", "/home/ten31spark/llamafactory-runs"), run_id)
 
 
 def _write_run_meta(run_id: str, meta: dict) -> None:
@@ -140,7 +140,6 @@ async def start_train(request: Request):
 
     sparks = sc.sparks(cfg)
     remote = _remote_run_dir(cfg, run_id)
-    image = cfg.get("dockerImage", "llamafactory-spark:latest")
     token = _hf_token()
 
     # Push the run dir to every participating Spark.
@@ -149,32 +148,35 @@ async def start_train(request: Request):
         if r.returncode != 0:
             raise HTTPException(502, f"rsync to {sp.host} failed: {r.stderr}")
 
-    # Launch a detached container per node.
-    master = sparks[0].host
-    for rank, sp in enumerate(sparks):
-        env = [f"-e HF_TOKEN={shlex.quote(token)}"] if token else []
-        if multinode:
-            env += [
-                "-e NNODES=2", f"-e NODE_RANK={rank}",
-                f"-e MASTER_ADDR={shlex.quote(master)}", "-e MASTER_PORT=29500",
-                "-e NPROC_PER_NODE=1",
-            ]
-        net = "--network host" if multinode else ""
-        cmd = (
-            f"docker rm -f lf-{run_id} >/dev/null 2>&1; "
-            f"docker run -d --name lf-{run_id} --gpus all --shm-size=16g {net} "
-            f"-v {shlex.quote(remote)}:/workspace/run {' '.join(env)} "
-            f"{shlex.quote(image)} lf-train"
-        )
-        res = sc.run(sp, cmd, timeout=120)
-        if res.returncode != 0:
-            raise HTTPException(502, f"docker run on {sp.host} failed: {res.stderr or res.stdout}")
+    # Launch llamafactory-cli as a background process on the Spark.
+    sp = sparks[0]
+    env_vars = ""
+    if token:
+        env_vars += f"HF_TOKEN={shlex.quote(token)} "
+    if multinode:
+        master = sparks[0].host
+        env_vars += f"NNODES=2 NODE_RANK=0 MASTER_ADDR={shlex.quote(master)} MASTER_PORT=29500 NPROC_PER_NODE=1 "
+
+    pidfile = f"{remote}/train.pid"
+    logfile = f"{remote}/train.log"
+    cmd = (
+        f"cd {shlex.quote(remote)} && "
+        f"{env_vars}"
+        f"nohup llamafactory-cli train config.yaml "
+        f"> {shlex.quote(logfile)} 2>&1 & "
+        f"echo $! > {shlex.quote(pidfile)} && cat {shlex.quote(pidfile)}"
+    )
+    res = sc.run(sp, cmd, timeout=30)
+    if res.returncode != 0:
+        raise HTTPException(502, f"Failed to launch training on {sp.host}: {res.stderr or res.stdout}")
+
+    pid = (res.stdout or "").strip()
 
     meta = {
-        "run_id": run_id, "dataset": dataset, "model": cfg["model"],
+        "run_id": run_id, "dataset": dataset, "model": cfg.get("model", "google/gemma-4-31B-it"),
         "finetuning_type": cfg.get("finetuningType", "lora"),
         "multinode": multinode, "hosts": [sp.host for sp in sparks],
-        "remote_dir": remote, "started": time.time(), "status": "running",
+        "remote_dir": remote, "pid": pid, "started": time.time(), "status": "running",
     }
     _write_run_meta(run_id, meta)
     return {"ok": True, "run_id": run_id}
@@ -198,16 +200,26 @@ def run_status(run_id: str):
         raise HTTPException(404, "no such run")
     cfg = _cfg()
     sp = sc.sparks(cfg)[0]
-    res = sc.run(sp, f"docker inspect -f '{{{{.State.Status}}}} {{{{.State.ExitCode}}}}' lf-{run_id} 2>/dev/null",
-                 timeout=30)
-    state = (res.stdout or "").strip()
-    if state:
-        status, _, code = state.partition(" ")
-        meta["status"] = "completed" if status == "exited" and code == "0" else (
-            "failed" if status == "exited" else status)
-        meta["exit_code"] = code
+    remote = _remote_run_dir(cfg, run_id)
+    pidfile = f"{remote}/train.pid"
+
+    # Check if process is still running
+    res = sc.run(sp, f"cat {shlex.quote(pidfile)} 2>/dev/null && echo '---' && "
+                     f"ps -p $(cat {shlex.quote(pidfile)} 2>/dev/null) -o state= 2>/dev/null || echo 'dead'",
+                 timeout=15)
+    output = (res.stdout or "").strip()
+    if "dead" in output or not output:
+        # Check if output dir exists (completed successfully)
+        check = sc.run(sp, f"test -d {shlex.quote(remote)}/output && echo 'has_output' || echo 'no_output'", timeout=15)
+        if "has_output" in (check.stdout or ""):
+            meta["status"] = "completed"
+        else:
+            meta["status"] = "failed" if meta.get("status") == "running" else meta.get("status", "unknown")
         _write_run_meta(run_id, meta)
-    return {"status": meta.get("status"), "raw": state}
+    else:
+        meta["status"] = "running"
+
+    return {"status": meta.get("status")}
 
 
 @app.get("/api/runs/{run_id}/log")
@@ -215,18 +227,26 @@ def run_log(run_id: str, follow: int = 1):
     _read_run_meta(run_id) or {}
     cfg = _cfg()
     sp = sc.sparks(cfg)[0]
+    remote = _remote_run_dir(cfg, run_id)
+    logfile = f"{remote}/train.log"
+
     if follow:
-        cmd = f"docker logs -f --tail 400 lf-{run_id}"
+        cmd = f"tail -f -n 400 {shlex.quote(logfile)} 2>/dev/null"
         return StreamingResponse(sc.stream(sp, cmd), media_type="text/plain")
-    res = sc.run(sp, f"docker logs --tail 800 lf-{run_id}", timeout=60)
+    res = sc.run(sp, f"tail -n 800 {shlex.quote(logfile)} 2>/dev/null", timeout=60)
     return JSONResponse({"log": (res.stdout or "") + (res.stderr or "")})
 
 
 @app.post("/api/runs/{run_id}/stop")
 def run_stop(run_id: str):
     cfg = _cfg()
-    for sp in sc.sparks(cfg):
-        sc.run(sp, f"docker rm -f lf-{run_id}", timeout=60)
+    sp = sc.sparks(cfg)[0]
+    remote = _remote_run_dir(cfg, run_id)
+    pidfile = f"{remote}/train.pid"
+
+    sc.run(sp, f"kill $(cat {shlex.quote(pidfile)} 2>/dev/null) 2>/dev/null; "
+               f"kill -9 $(cat {shlex.quote(pidfile)} 2>/dev/null) 2>/dev/null", timeout=30)
+
     meta = _read_run_meta(run_id)
     if meta:
         meta["status"] = "stopped"

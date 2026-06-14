@@ -63,7 +63,7 @@
     <label>Dataset</label>
     <select id="runDataset"></select>
     <div class="grid">
-      <div><label>Model (override)</label><input id="ovModel" placeholder="(use default)"/></div>
+      <div><label>Model (override)</label><input id="ovModel" placeholder="(default: google/gemma-4-31B-it)"/></div>
       <div><label>Epochs</label><input id="ovEpochs" placeholder="(default)"/></div>
       <div><label>Learning rate</label><input id="ovLr" placeholder="(default)"/></div>
       <div><label>LoRA rank</label><input id="ovRank" placeholder="(default)"/></div>
@@ -102,7 +102,7 @@ async function loadConfig(){
     const c = await j('/api/config');
     const sparks = [c.primarySparkHost, c.useBothSparks ? c.secondarySparkHost : null].filter(Boolean).join(' + ');
     $('#cfgSummary').innerHTML =
-      `<span class="pill">${c.model||'?'}</span>`+
+      `<span class="pill">${c.model||'google/gemma-4-31B-it'}</span>`+
       `<span class="pill">${c.finetuningType||'lora'}</span>`+
       `<span class="pill">Spark: ${sparks||'<not set>'}</span>`+
       `<span class="pill">${c.quantizationBit?('QLoRA '+c.quantizationBit+'-bit'):'bf16'}</span>`;
